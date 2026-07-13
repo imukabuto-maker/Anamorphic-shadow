@@ -96,6 +96,11 @@
       </div>
 
       <div class="mt-5 space-y-5">
+        <div class="flex items-center justify-between">
+          <span class="text-sm">Apply Threshold</span>
+          <div class="toggle on" id="t-thresholdEnabled" onclick="toggleThresholdEnabled()"><div class="dot"></div></div>
+        </div>
+        <div class="text-xs subtle -mt-3" id="thresholdEnabledHint">On — the slider below adjusts the black/white cutoff. Turn off if your image is already a clean silhouette (e.g. pre-edited elsewhere) and you don't want it re-thresholded.</div>
         <div>
           <div class="flex justify-between text-sm mb-1"><span>Threshold</span><span class="valbox mono"><span id="v-threshold">128</span></span></div>
           <input type="range" id="threshold" min="0" max="255" value="128">
@@ -280,7 +285,7 @@
           <span class="text-sm">Invert Cutout</span>
           <div class="toggle" id="t-invertCutout" onclick="toggleInvertCutout()"><div class="dot"></div></div>
         </div>
-        <div class="text-xs subtle -mt-2">Off — silhouette stays solid, background becomes the cutout (default). On — swapped: the silhouette itself becomes the opening, and the dead space toward the front opening is cut away too.</div>
+        <div class="text-xs subtle -mt-2">Off — every panel keeps its full declared Depth, even past where the silhouette content ends (default). On — each panel's own physical length is cut right at the deepest real cutout (just a 1mm hairline left), removing the leftover rectangular frame instead of carrying it all the way to the front opening. All 4 side panels are trimmed to the same length so the box still closes evenly.</div>
       </div>
     </div>
   </div>
@@ -323,7 +328,7 @@
    STATE
    ============================================================ */
 const state = {
-  threshold:128, invert:false, noise:0, noiseMode:'white',
+  threshold:128, thresholdEnabled:true, invert:false, noise:0, noiseMode:'white',
   resolution:640, smoothing:1.5,
   boxW:200, boxH:150, boxD:80,
   ledZ:40, ledX:0, ledY:0, deviceH:0,
@@ -348,6 +353,20 @@ function toggleInvertCutout(){
   state.invertCutout = !state.invertCutout;
   $('t-invertCutout').classList.toggle('on', state.invertCutout);
   forceRecompute('geom');
+}
+
+function toggleThresholdEnabled(){
+  state.thresholdEnabled = !state.thresholdEnabled;
+  $('t-thresholdEnabled').classList.toggle('on', state.thresholdEnabled);
+  const slider = $('threshold'), input = $('v-threshold'), hint = $('thresholdEnabledHint');
+  slider.disabled = !state.thresholdEnabled;
+  input.disabled = !state.thresholdEnabled;
+  slider.style.opacity = state.thresholdEnabled ? '1' : '0.4';
+  input.style.opacity = state.thresholdEnabled ? '1' : '0.4';
+  hint.textContent = state.thresholdEnabled
+    ? "On — the slider below adjusts the black/white cutoff. Turn off if your image is already a clean silhouette (e.g. pre-edited elsewhere) and you don't want it re-thresholded."
+    : "Off — using your image's black/white pixels as-is (fixed midpoint, ignoring the slider). Best for images already prepared as a clean silhouette elsewhere.";
+  forceRecompute('image');
 }
 
 const AUTO_DEPTH_MARGIN = 10; // mm of structural margin added beyond LED Z when Depth is on Auto
@@ -592,10 +611,11 @@ function runPipeline(){
   const data = octx.getImageData(0,0,mw,mh).data;
 
   const mask = new Uint8Array(mw*mh);
+  const cutoff = state.thresholdEnabled ? state.threshold : 128; // fixed neutral midpoint when threshold adjustment is off
   for(let i=0;i<mw*mh;i++){
     const r=data[i*4],g=data[i*4+1],b=data[i*4+2],a=data[i*4+3];
     const lum = 0.299*r+0.587*g+0.114*b;
-    let v = (a<10) ? 0 : (lum < state.threshold ? 1 : 0);
+    let v = (a<10) ? 0 : (lum < cutoff ? 1 : 0);
     if(state.invert) v = 1-v;
     mask[i]=v;
   }
@@ -791,19 +811,9 @@ function computeProjection(){
     const closed = closeMask(finalMask, p.w, p.h, 1);
     removeSmallComponents(closed, p.w, p.h, Math.max(2,Math.round(PX_PER_MM*PX_PER_MM*0.15)), 'both');
 
-    // Invert Cutout: swap solid <-> hollow. Since the region between the
-    // deepest real silhouette content and the front opening is normally pure
-    // background (all "solid"), inverting turns that whole dead zone into an
-    // open cutout, and keeps the silhouette detail itself as the solid piece.
-    if(state.invertCutout){
-      for(let i=0;i<closed.length;i++) closed[i] = closed[i] ? 0 : 1;
-    }
-
     // Device clearance zone: v (depth) runs 0=wall-side -> boxD=front/opening,
     // which maps to row index 0 -> p.h. Blank out every row inside the
     // reserved depth so the controller/driver never collides with a cutout.
-    // Applied AFTER inversion so the clearance zone is always solid,
-    // regardless of Invert Cutout.
     const clearRows = Math.round((clearMM/boxD)*p.h);
     for(let row=0; row<clearRows && row<p.h; row++){
       const base = row*p.w;
@@ -811,7 +821,32 @@ function computeProjection(){
     }
     result[k]={mask:closed, w:p.w, h:p.h, dimW:p.dimW, dimH:boxD, clearMM};
   }
-  return {panels:result, led:{x:Lx,y:Ly,z:Lz}, wallImgW, wallImgH};
+
+  // Invert Cutout (redefined): instead of poking a hole in the dead zone —
+  // which left the panel's own rectangular frame intact all the way to the
+  // front opening, and was exactly what cast that unwanted "X" shape in the
+  // 3D view — TRIM the panel's own physical depth so the material simply
+  // doesn't extend past the deepest real content at all. One shared depth is
+  // used for all 4 side panels (the deepest of the four) so the box still
+  // closes evenly at the front.
+  // NOTE: trimmed right at the content boundary (no extra buffer) per
+  // request — only a hairline 1mm is kept, just enough that the very last
+  // cutout row doesn't sit exactly on a zero-thickness edge.
+  let effectiveDepth = boxD;
+  if(state.invertCutout){
+    let maxRowAll=-1, refH=0;
+    for(const k of ['top','bottom','left','right']){
+      const r = findPanelMaxRow(result[k]);
+      if(r>maxRowAll) maxRowAll=r;
+      refH = result[k].h;
+    }
+    if(maxRowAll>=0 && refH>0){
+      const contentMM = ((maxRowAll+1)/refH)*boxD;
+      effectiveDepth = Math.min(boxD, Math.max(clearMM+1, contentMM+1));
+    }
+  }
+
+  return {panels:result, led:{x:Lx,y:Ly,z:Lz}, wallImgW, wallImgH, effectiveDepth};
 }
 
 /* ---------- marching squares ---------- */
@@ -1108,9 +1143,20 @@ function initThreeScene(){
   );
   scene.add(ledMesh);
 
-  const wallMat = new THREE.MeshStandardMaterial({color:0x1a5f50, roughness:1, metalness:0});
+  // The wall's appearance is driven entirely by OUR OWN raycasting result
+  // (baked into a canvas texture below), not by Three.js's automatic
+  // point-light shadow physics. The real shadow system lets light leak
+  // around the box's finite panel edges at wide angles (since the panels
+  // don't fully enclose the LED) — producing a stray "X" of light on the
+  // wall that has nothing to do with the actual cutout data. Using an unlit
+  // texture here guarantees the wall only ever shows what our raycasting
+  // model says it should, matching the 2D panel layout exactly.
+  const wallCanvas = document.createElement('canvas');
+  wallCanvas.width = 512; wallCanvas.height = 512;
+  const wallTexture = new THREE.CanvasTexture(wallCanvas);
+  const wallMat = new THREE.MeshBasicMaterial({map: wallTexture});
   const wallMesh = new THREE.Mesh(new THREE.PlaneGeometry(4000,4000), wallMat);
-  wallMesh.receiveShadow = true;
+  wallMesh.receiveShadow = false;
   scene.add(wallMesh);
 
   const panelGroup = new THREE.Group();
@@ -1182,7 +1228,7 @@ function initThreeScene(){
   });
 
   scene3D.ready = true;
-  Object.assign(scene3D, {renderer, scene, camera, ledLight, ledMesh, wallMesh, panelGroup, camState, draw, resize});
+  Object.assign(scene3D, {renderer, scene, camera, ledLight, ledMesh, wallMesh, wallCanvas, wallTexture, panelGroup, camState, draw, resize});
   resize();
 }
 
@@ -1207,12 +1253,53 @@ function buildPanelMesh(polyOutlineMM, holePolysMM, offsetU, thickness, basis, p
   return mesh;
 }
 
+function updateWallTexture(proj, boxW, boxH, boxD, depth){
+  const cv = scene3D.wallCanvas;
+  const res = cv.width; // 512, fixed
+  const ctx = cv.getContext('2d');
+  const margin = 3.0; // generous backdrop margin so the wall plane doesn't look tightly cropped around the box
+  const viewW = proj.wallImgW*margin, viewH = proj.wallImgH*margin;
+  const imgData = ctx.createImageData(res,res);
+
+  const cosA=Math.cos(state.boxRot*DEG*-1), sinA=Math.sin(state.boxRot*DEG*-1);
+  const Lx=proj.led.x, Ly=proj.led.y, Lz=proj.led.z;
+
+  for(let py=0; py<res; py++){
+    for(let px=0; px<res; px++){
+      const wx = (px/res-0.5)*viewW;
+      const wy = -(py/res-0.5)*viewH;
+      const bx = wx*cosA - wy*sinA;
+      const by = wx*sinA + wy*cosA;
+      const hit = raycastPanel(Lx,Ly,Lz, bx,by,0, boxW,boxH,boxD);
+      // No panel intersection = physically behind/blocked by the box itself
+      // (see the earlier "star artifact" fix) — always dark, never lit.
+      let lit=0;
+      if(hit){
+        const p = proj.panels[hit.panel];
+        let ppx = Math.floor((hit.u/p.dimW)*p.w), ppy=Math.floor((hit.v/boxD)*p.h);
+        if(ppx>=0&&ppx<p.w&&ppy>=0&&ppy<p.h) lit = p.mask[ppy*p.w+ppx];
+      }
+      const idx=(py*res+px)*4;
+      if(lit){ imgData.data[idx]=26; imgData.data[idx+1]=95; imgData.data[idx+2]=80; imgData.data[idx+3]=255; }
+      else { imgData.data[idx]=8; imgData.data[idx+1]=10; imgData.data[idx+2]=9; imgData.data[idx+3]=255; }
+    }
+  }
+  ctx.putImageData(imgData,0,0);
+  scene3D.wallTexture.needsUpdate = true;
+
+  // Scale the wall plane so this texture's extent (viewW x viewH physical mm)
+  // maps 1:1 onto the plane's surface instead of stretching across the fixed
+  // 4000x4000 placeholder geometry.
+  scene3D.wallMesh.scale.set(viewW/4000, viewH/4000, 1);
+}
+
 function rebuild3DScene(proj){
   try{
     initThreeScene();
     if(!scene3D.ready) return; // three.js failed to load (e.g. offline) — skip silently
 
     const boxW=state.boxW, boxH=state.boxH, boxD=state.boxD, thick=state.thick;
+    const depth = proj.effectiveDepth || boxD; // trimmed shorter than boxD when Invert Cutout removes the dead zone
     const V3 = (x,y,z)=>new THREE.Vector3(x,y,z);
 
     // clear previous panel meshes
@@ -1221,7 +1308,7 @@ function rebuild3DScene(proj){
       m.geometry.dispose(); m.material.dispose();
     }
 
-    const rectOutline = (dimW)=>[[0,0],[dimW,0],[dimW,boxD],[0,boxD]];
+    const rectOutline = (dimW)=>[[0,0],[dimW,0],[dimW,depth],[0,depth]];
     const panelColor = 0x2a3838;
 
     const defs = [
@@ -1259,13 +1346,19 @@ function rebuild3DScene(proj){
     // LED position + light
     scene3D.ledLight.position.set(proj.led.x, proj.led.y, proj.led.z);
     scene3D.ledMesh.position.copy(scene3D.ledLight.position);
+    // The wall's look now comes entirely from our own texture (below), so the
+    // point light no longer needs to cast shadows onto anything but the
+    // panels themselves — this is what stops the stray light leaking around
+    // the box's finite edges from ever reaching the wall.
+    scene3D.ledLight.castShadow = false;
 
     // wall plane sits just behind the back plate
     scene3D.wallMesh.position.set(0,0,-2);
+    updateWallTexture(proj, boxW, boxH, boxD, depth);
 
     // frame the camera around the box the first time (or if size changed a lot)
-    const diag = Math.hypot(boxW,boxH,boxD);
-    scene3D.camState.target.set(0,0,boxD/2);
+    const diag = Math.hypot(boxW,boxH,depth);
+    scene3D.camState.target.set(0,0,depth/2);
     const desiredR = Math.max(150, diag*1.6);
     scene3D.defaultRadius = desiredR;
     if(!scene3D.framedOnce || Math.abs(scene3D.lastDiag-diag) > diag*0.4){
@@ -1292,7 +1385,7 @@ function renderPanels(proj){
   grid.innerHTML='';
   order.forEach(o=>{
     const p = proj.panels[o.key];
-    const localW = o.dimW, localD = state.boxD;
+    const localW = o.dimW, localD = proj.effectiveDepth;
     const outline = buildPanelOutline(localW, localD, state.thick, state.tab);
     const cutouts = panelCutoutPaths(p.mask, p.w, p.h, localW, localD);
     const pad = state.thick+4;
@@ -1368,6 +1461,11 @@ function renderPanels(proj){
 function buildNestedLayout(){
   const proj = state.panels;
   const boxW=state.boxW, boxH=state.boxH, boxD=state.boxD, thick=state.thick, tab=state.tab;
+  // When Invert Cutout trims the panels shorter than the declared box depth,
+  // every side panel's OUTLINE (not the hole data, which is unaffected)
+  // should stop there too — otherwise the leftover rectangular frame beyond
+  // the content is exactly what was casting the unwanted boxy/"X" shape.
+  const depth = proj.effectiveDepth || boxD;
 
   // Strip order per spec: Top, Right, Bottom, Left, zero-gap, left to right.
   const seq = [
@@ -1392,7 +1490,7 @@ function buildNestedLayout(){
   // The wrap-around seam (Top's left edge <-> Left's right edge) is the one
   // seam that is NOT adjacent in the flat strip, so it can't literally share
   // one path — its phases are matched explicitly via matingPhase() instead.
-  const nWrap = tabCount(boxD, tab);
+  const nWrap = tabCount(depth, tab);
   const topLeftPhase = false;
   const leftRightPhase = matingPhase(nWrap, topLeftPhase);
 
@@ -1403,12 +1501,12 @@ function buildNestedLayout(){
   seq.forEach((s, i) => {
     const localW = s.dimW;
     const top = zigzag('h', 0, 0, localW, thick, tab, -1, sidePanelWallPhase);
-    const bottom = flatEdge('h', boxD, localW, 0); // front/opening face: always flat, zero interlock
+    const bottom = flatEdge('h', depth, localW, 0); // front/opening face: always flat, zero interlock
 
     let left, right;
     if (i === 0) {
       // Top panel's own left edge = one half of the wrap-around seam
-      left = zigzag('v', 0, boxD, 0, thick, tab, -1, topLeftPhase);
+      left = zigzag('v', 0, depth, 0, thick, tab, -1, topLeftPhase);
     } else {
       // Shared seam: literally the same points as the previous panel's right
       // edge (just reversed for correct winding) — cannot collide with itself.
@@ -1418,9 +1516,9 @@ function buildNestedLayout(){
     if (i === seq.length - 1) {
       // Left panel's right edge = the other half of the wrap-around seam,
       // phase computed to be the exact complement of Top's left edge.
-      right = zigzag('v', localW, 0, boxD, thick, tab, 1, leftRightPhase);
+      right = zigzag('v', localW, 0, depth, thick, tab, 1, leftRightPhase);
     } else {
-      right = zigzag('v', localW, 0, boxD, thick, tab, 1, sidePanelWallPhase);
+      right = zigzag('v', localW, 0, depth, thick, tab, 1, sidePanelWallPhase);
       // Reuse the exact same curve (just reversed + re-based to this panel's
       // local x=0) as the NEXT panel's left edge. Subtracting localW (not
       // forcing every point to 0) is what preserves the tab bumps — the two
@@ -1443,7 +1541,7 @@ function buildNestedLayout(){
     xCursor += localW;
   });
 
-  const stripW = xCursor, stripH = boxD;
+  const stripW = xCursor, stripH = depth;
 
   // --- Back Plate: nested beneath the Top panel's footprint to reuse sheet
   // area. NOTE: a small gap is required here — the Back Plate's own top edge
@@ -1451,6 +1549,8 @@ function buildNestedLayout(){
   // 3D assembly), but in this flat layout it merely sits near Top's FRONT/
   // OPENING edge, which is deliberately flat. Placing them with zero gap let
   // the teeth overlap straight into that flat line, corrupting the cut path.
+  // The Back Plate itself always stays full boxW x boxH — it mounts flush to
+  // the wall regardless of how short the side panels get trimmed.
   const nWallW = tabCount(boxW, tab), nWallH = tabCount(boxH, tab);
   const backPhases = {
     top:    matingPhase(nWallW, sidePanelWallPhase), // mates with Top panel's wall edge
