@@ -1521,9 +1521,16 @@ function buildPipeBoxStrip(){
   const boxW=state.boxW, boxH=state.boxH, boxD=state.boxD;
   const depth = proj.effectiveDepth || boxD;
 
+  // Mirror flags fixed to match actual seam geometry (verified numerically):
+  // going clockwise Top->Right->Bottom->Left, only Right and Bottom need
+  // their content reversed for the shared corner to land at the same
+  // absolute position as its neighbor. Top and Left already run the correct
+  // direction naturally. (Previously Top/Bottom were mirrored and Right/Left
+  // weren't — that put the Top-Right seam's shared corner pixels ~150mm
+  // apart instead of touching.)
   const seq = [
-    {key:'top',    dimW:boxW, mirror:true},
-    {key:'right',  dimW:boxH, mirror:false},
+    {key:'top',    dimW:boxW, mirror:false},
+    {key:'right',  dimW:boxH, mirror:true},
     {key:'bottom', dimW:boxW, mirror:true},
     {key:'left',   dimW:boxH, mirror:false}
   ];
@@ -1566,9 +1573,14 @@ function buildNestedLayout(){
   const depth = proj.effectiveDepth || boxD;
 
   // Strip order per spec: Top, Right, Bottom, Left, zero-gap, left to right.
+  // Mirror flags fixed to match actual seam geometry (verified numerically):
+  // only Right and Bottom need their content reversed for the shared corner
+  // to land at the same absolute position as its neighbor. Previously
+  // Top/Bottom were mirrored and Right/Left weren't, which put the Top-Right
+  // seam's shared corner pixels far apart instead of touching.
   const seq = [
-    {key:'top',    dimW:boxW, mirror:true},
-    {key:'right',  dimW:boxH, mirror:false},
+    {key:'top',    dimW:boxW, mirror:false},
+    {key:'right',  dimW:boxH, mirror:true},
     {key:'bottom', dimW:boxW, mirror:true},
     {key:'left',   dimW:boxH, mirror:false}
   ];
