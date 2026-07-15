@@ -827,6 +827,7 @@ function computeProjection(){
 
   const result={};
   const clearMM = Math.max(0, Math.min(state.deviceH, boxD)); // never let it exceed the panel's own depth
+  const minComponent = Math.max(2,Math.round(PX_PER_MM*PX_PER_MM*0.15));
   for(const k in panelsRaw){
     const p=panelsRaw[k];
     const finalMask=new Uint8Array(p.w*p.h);
@@ -835,7 +836,7 @@ function computeProjection(){
     // sword blade) can be only a couple of panel-pixels wide, and a stronger
     // closing + a large noise-removal threshold were quietly eating them.
     const closed = closeMask(finalMask, p.w, p.h, 1);
-    removeSmallComponents(closed, p.w, p.h, Math.max(2,Math.round(PX_PER_MM*PX_PER_MM*0.15)), 'both');
+    removeSmallComponents(closed, p.w, p.h, minComponent, 'both');
 
     // Device clearance zone: v (depth) runs 0=wall-side -> boxD=front/opening,
     // which maps to row index 0 -> p.h. Blank out every row inside the
@@ -845,6 +846,13 @@ function computeProjection(){
       const base = row*p.w;
       for(let col=0; col<p.w; col++) closed[base+col]=0;
     }
+    // The hard cut above can slice through real content or leave tiny
+    // fragments right along that new boundary — clean up again so nothing
+    // jagged survives right at the clearance line (this was showing up as a
+    // scribbly "noise" patch that looked like a light leak, but was really
+    // just an un-cleaned edge artifact from the forced cut).
+    removeSmallComponents(closed, p.w, p.h, minComponent, 'both');
+
     result[k]={mask:closed, w:p.w, h:p.h, dimW:p.dimW, dimH:boxD, clearMM};
   }
 
