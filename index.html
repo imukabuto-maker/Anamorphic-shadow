@@ -179,16 +179,18 @@
         <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
       </div>
       <div class="section-body space-y-4">
-        <div>
-          <div class="flex justify-between text-sm mb-1"><span>Width</span><span class="valbox mono"><span id="v-boxW">200</span> mm</span></div>
-          <input type="range" id="boxW" min="60" max="500" value="200">
+        <div id="widthHeightGroup" class="space-y-4">
+          <div>
+            <div class="flex justify-between text-sm mb-1"><span>Width</span><span class="valbox mono"><span id="v-boxW">200</span> mm</span></div>
+            <input type="range" id="boxW" min="60" max="500" value="200">
+          </div>
+          <div>
+            <div class="flex justify-between text-sm mb-1"><span>Height</span><span class="valbox mono"><span id="v-boxH">150</span> mm</span></div>
+            <input type="range" id="boxH" min="60" max="500" value="150">
+          </div>
         </div>
         <div>
-          <div class="flex justify-between text-sm mb-1"><span>Height</span><span class="valbox mono"><span id="v-boxH">150</span> mm</span></div>
-          <input type="range" id="boxH" min="60" max="500" value="150">
-        </div>
-        <div>
-          <div class="flex justify-between text-sm mb-1"><span>Depth</span><span class="valbox mono"><span id="v-boxD">80</span> mm</span></div>
+          <div class="flex justify-between text-sm mb-1"><span id="depthLabel">Depth</span><span class="valbox mono"><span id="v-boxD">80</span> mm</span></div>
           <input type="range" id="boxD" min="15" max="300" value="80">
           <div class="flex items-center justify-between mt-2">
             <span class="text-xs subtle">Auto (= LED Z + margin)</span>
@@ -210,6 +212,17 @@
           <div class="toggle" id="t-boxMode" onclick="toggleBoxMode()"><div class="dot"></div></div>
         </div>
         <div class="text-xs subtle -mt-2" id="boxModeHint">Off — designs a laser-cut acrylic box from scratch, with finger-joint interlocks and a Back Plate. Turn on if you already have a plastic box/tube and just want a wrap-around paper pattern to drill or cut by hand.</div>
+
+        <div class="flex items-center justify-between">
+          <span class="text-sm">Existing Pipe (cylindrical)</span>
+          <div class="toggle" id="t-pipeMode" onclick="togglePipeMode()"><div class="dot"></div></div>
+        </div>
+        <div class="text-xs subtle -mt-2" id="pipeModeHint">Off. Turn on if your existing tube is round instead of a 4-sided box — the projection math, preview, and export pattern all switch to a wrapped cylindrical surface instead of 4 flat sides.</div>
+        <div id="pipeRadiusGroup" class="hidden">
+          <div class="flex justify-between text-sm mb-1"><span>Pipe Radius</span><span class="valbox mono"><span id="v-pipeRadius">40</span> mm</span></div>
+          <input type="range" id="pipeRadius" min="10" max="250" value="40">
+          <div class="text-xs subtle mt-1">Measure the INSIDE radius of your pipe (half the inside diameter) — this is where the wall surface actually sits.</div>
+        </div>
       </div>
     </div>
 
@@ -350,7 +363,7 @@ const state = {
   ledZ:40, ledX:0, ledY:0, deviceH:0,
   autoDepth:false,
   scale:4.0, offX:0, offY:0, boxRot:0, shadowRot:0,
-  thick:3.0, tab:10, invertCutout:false, boxMode:false,
+  thick:3.0, tab:10, invertCutout:false, boxMode:false, pipeMode:false, pipeRadius:40,
   mask:null, maskW:0, maskH:0,       // processed binary silhouette (1 = silhouette ink)
   hasImage:false,
   panels:null                        // computed panel data {top,bottom,left,right}
@@ -373,11 +386,30 @@ function toggleInvertCutout(){
 
 function toggleBoxMode(){
   state.boxMode = !state.boxMode;
+  if(state.boxMode && state.pipeMode){ state.pipeMode = false; $('t-pipeMode').classList.remove('on'); applyPipeModeUI(); }
   $('t-boxMode').classList.toggle('on', state.boxMode);
-  $('thickTabGroup').style.display = state.boxMode ? 'none' : '';
+  $('thickTabGroup').style.display = (state.boxMode||state.pipeMode) ? 'none' : '';
   $('boxModeHint').textContent = state.boxMode
     ? "On — Back Plate is skipped, panel outlines are plain (no finger joints), and Export gives one continuous wrap-around strip sized to the box's exact circumference, ready to print and glue/tape on."
     : "Off — designs a laser-cut acrylic box from scratch, with finger-joint interlocks and a Back Plate. Turn on if you already have a plastic box/tube and just want a wrap-around paper pattern to drill or cut by hand.";
+  forceRecompute('geom');
+}
+
+function applyPipeModeUI(){
+  $('pipeRadiusGroup').classList.toggle('hidden', !state.pipeMode);
+  $('widthHeightGroup').style.display = state.pipeMode ? 'none' : '';
+  $('depthLabel').textContent = state.pipeMode ? 'Length' : 'Depth';
+  $('thickTabGroup').style.display = (state.boxMode||state.pipeMode) ? 'none' : '';
+  $('pipeModeHint').textContent = state.pipeMode
+    ? "On — projection, preview, and export all switch to a single wrapped cylindrical surface (no Back Plate, no interlock). Set Pipe Radius below."
+    : "Off. Turn on if your existing tube is round instead of a 4-sided box — the projection math, preview, and export pattern all switch to a wrapped cylindrical surface instead of 4 flat sides.";
+}
+
+function togglePipeMode(){
+  state.pipeMode = !state.pipeMode;
+  if(state.pipeMode && state.boxMode){ state.boxMode = false; $('t-boxMode').classList.remove('on'); }
+  $('t-pipeMode').classList.toggle('on', state.pipeMode);
+  applyPipeModeUI();
   forceRecompute('geom');
 }
 
@@ -445,7 +477,7 @@ function findPanelMaxRow(p){
 // reaches — the wasted-material gap reported earlier), measure how deep the
 // real cutouts go across all 4 side panels and hug THAT instead.
 function measureTightDepth(proj, currentBoxD){
-  const sideKeys = ['top','bottom','left','right'];
+  const sideKeys = proj.isPipe ? ['pipe'] : ['top','bottom','left','right'];
   let maxRow=-1, refH=0;
   for(const k of sideKeys){
     const p = proj.panels[k];
@@ -470,12 +502,12 @@ const sliderMap = [
   ['smoothing','smoothing',1,'geom'], ['boxW','boxW',0,'geom'], ['boxH','boxH',0,'geom'], ['boxD','boxD',0,'geom'],
   ['ledZ','ledZ',0,'geom'], ['ledX','ledX',0,'geom'], ['ledY','ledY',0,'geom'], ['deviceH','deviceH',0,'geom'],
   ['scale','scale',1,'geom'], ['offX','offX',0,'geom'], ['offY','offY',0,'geom'], ['boxRot','boxRot',0,'geom'], ['shadowRot','shadowRot',0,'geom'],
-  ['thick','thick',1,'geom'], ['tab','tab',0,'geom']
+  ['thick','thick',1,'geom'], ['tab','tab',0,'geom'], ['pipeRadius','pipeRadius',0,'geom']
 ];
 const labelIdMap = { threshold:'v-threshold', noise:'v-noise', resolution:'v-res', smoothing:'v-smooth',
   boxW:'v-boxW', boxH:'v-boxH', boxD:'v-boxD', ledZ:'v-ledZ', ledX:'v-ledX', ledY:'v-ledY', deviceH:'v-deviceH',
   scale:'v-scale', offX:'v-offX', offY:'v-offY', boxRot:'v-boxRot', shadowRot:'v-shadowRot',
-  thick:'v-thick', tab:'v-tab' };
+  thick:'v-thick', tab:'v-tab', pipeRadius:'v-pipeRadius' };
 
 // Heavy work only ever runs on RELEASE (change event) or a typed/committed
 // value — never on every 'input' tick while dragging. Continuously
@@ -722,6 +754,32 @@ function raycastPanel(Lx,Ly,Lz, Qx,Qy,Qz, boxW,boxH,boxD){
   return null;
 }
 
+// Pipe Mode: single curved wall instead of 4 flat panels. Ray from LED L to
+// wall point Q; find where it crosses the cylinder x^2+y^2=R^2 within depth
+// [0,D]. u = arc-length position around the circumference (0..2*pi*R),
+// v = depth (0=wall..D=front opening), matching the flat-panel convention.
+function raycastCylinder(Lx,Ly,Lz, Qx,Qy,Qz, R, D){
+  const dx=Qx-Lx, dy=Qy-Ly, dz=Qz-Lz;
+  const a = dx*dx+dy*dy;
+  if(a<1e-12) return null; // ray parallel to the pipe's axis, never reaches the wall
+  const b = 2*(Lx*dx+Ly*dy);
+  const c = Lx*Lx+Ly*Ly-R*R;
+  const disc = b*b-4*a*c;
+  if(disc<0) return null;
+  const sq = Math.sqrt(disc);
+  const t1=(-b-sq)/(2*a), t2=(-b+sq)/(2*a);
+  const cands = [t1,t2].filter(t=>t>1e-6 && t<=1.000001).sort((x,y)=>x-y);
+  for(const t of cands){
+    const z = Lz+t*dz;
+    if(z<0||z>D) continue;
+    const px=Lx+t*dx, py=Ly+t*dy;
+    let theta = Math.atan2(py,px);
+    if(theta<0) theta += Math.PI*2;
+    return {u: R*theta, v: z};
+  }
+  return null;
+}
+
 const PX_PER_MM = 8; // panel raster density (raised from 4 -> preserves thin details like a sword blade)
 
 /* ---------- morphological closing (dilate -> erode) ----------
@@ -768,6 +826,78 @@ function closeMask(mask,w,h,iterations){
   for(let i=0;i<iterations;i++) m=dilateMask(m,w,h);
   for(let i=0;i<iterations;i++) m=erodeMask(m,w,h);
   return m;
+}
+
+// Pipe Mode: same LED raycasting idea as computeProjection(), but against a
+// single curved cylindrical wall instead of 4 flat panels. The "panel" here
+// is the pipe's surface unrolled flat: width = circumference (2*pi*R),
+// height = pipe length, u = arc-length position, v = depth.
+function computeProjectionCylinder(){
+  const R = state.pipeRadius, D = state.boxD;
+  const circumference = 2*Math.PI*R;
+  const ledCorrection = state.thick*2;
+  const Lx = state.ledX, Ly = state.ledY+ledCorrection, Lz = Math.min(Math.max(state.ledZ,1), D-1);
+
+  const mw=state.maskW, mh=state.maskH, mask=state.mask;
+  const wallImgW = (2*R)*state.scale; // diameter is the natural "size" reference, analogous to boxW for flat mode
+  const wallImgH = wallImgW*(mh/mw);
+  const cosA=Math.cos(-state.boxRot*DEG), sinA=Math.sin(-state.boxRot*DEG);
+  const cosS=Math.cos(state.shadowRot*DEG), sinS=Math.sin(state.shadowRot*DEG);
+
+  const pw = Math.max(4, Math.round(circumference*PX_PER_MM));
+  const ph = Math.max(4, Math.round(D*PX_PER_MM));
+  const total = new Uint32Array(pw*ph), lit = new Uint32Array(pw*ph);
+
+  const superSample = state.scale > 5 ? 2 : 1;
+  const sw = mw*superSample, sh = mh*superSample;
+
+  for(let sy=0; sy<sh; sy++){
+    for(let sx=0; sx<sw; sx++){
+      const srcX = Math.min(mw-1, Math.floor(sx/superSample));
+      const srcY = Math.min(mh-1, Math.floor(sy/superSample));
+      const m = mask[srcY*mw+srcX];
+      const nx=(sx+0.5)/sw-0.5, ny=(sy+0.5)/sh-0.5;
+      const lx0=nx*wallImgW, ly0=-ny*wallImgH;
+      const lx = lx0*cosS - ly0*sinS + state.offX;
+      const ly = lx0*sinS + ly0*cosS + state.offY;
+      const qx = lx*cosA - ly*sinA;
+      const qy = lx*sinA + ly*cosA;
+      const hit = raycastCylinder(Lx,Ly,Lz, qx,qy,0, R, D);
+      if(!hit) continue;
+      let px = Math.floor((hit.u/circumference)*pw);
+      let py = Math.floor((hit.v/D)*ph);
+      if(px<0)px=0; if(px>=pw)px=pw-1; if(py<0)py=0; if(py>=ph)py=ph-1;
+      const idx=py*pw+px;
+      total[idx]++;
+      if(m===0) lit[idx]++;
+    }
+  }
+
+  const clearMM = Math.max(0, Math.min(state.deviceH, D));
+  const minComponent = Math.max(2,Math.round(PX_PER_MM*PX_PER_MM*0.15));
+  const finalMask = new Uint8Array(pw*ph);
+  for(let i=0;i<finalMask.length;i++) finalMask[i] = (total[i]>0 && (lit[i]/total[i])>=0.5) ? 1:0;
+  const closed = closeMask(finalMask, pw, ph, 1);
+  removeSmallComponents(closed, pw, ph, minComponent, 'both');
+  const clearRows = Math.round((clearMM/D)*ph);
+  for(let row=0; row<clearRows && row<ph; row++){
+    const base=row*pw;
+    for(let col=0; col<pw; col++) closed[base+col]=0;
+  }
+  removeSmallComponents(closed, pw, ph, minComponent, 'both');
+
+  const pipePanel = {mask:closed, w:pw, h:ph, dimW:circumference, dimH:D, clearMM};
+
+  let effectiveDepth = D;
+  if(state.invertCutout){
+    const maxRow = findPanelMaxRow(pipePanel);
+    if(maxRow>=0){
+      const contentMM = ((maxRow+1)/ph)*D;
+      effectiveDepth = Math.min(D, Math.max(clearMM+1, contentMM+1));
+    }
+  }
+
+  return { panels:{pipe:pipePanel}, led:{x:Lx,y:Ly,z:Lz}, wallImgW, wallImgH, effectiveDepth, isPipe:true, circumference, R };
 }
 
 function computeProjection(){
@@ -1098,14 +1228,14 @@ function pathDFromPoints(pts, close){
    ============================================================ */
 function computeProjectionAndRender(){
   syncAutoDepth(); // sets Depth to the theoretical LED-Z + margin upper bound, if Auto is on
-  let proj = computeProjection();
+  let proj = state.pipeMode ? computeProjectionCylinder() : computeProjection();
   if(state.autoDepth){
     const tight = measureTightDepth(proj, state.boxD);
     if(tight !== null && tight < state.boxD){
       state.boxD = tight;
       $('boxD').value = tight;
       $('v-boxD').value = Math.round(tight);
-      proj = computeProjection(); // re-run once at the tighter depth for accurate final geometry
+      proj = state.pipeMode ? computeProjectionCylinder() : computeProjection(); // re-run once at the tighter depth for accurate final geometry
     }
   }
   state.panels = proj;
@@ -1277,6 +1407,53 @@ function initThreeScene(){
   resize();
 }
 
+function buildPipeMesh3D(pipePanel, R, depth, matColor){
+  // A curved surface can't use ExtrudeGeometry the way flat panels do, so
+  // this builds the tube wall directly as a grid of small quads wrapped
+  // around the circumference — each grid cell is included only if the pipe
+  // mask says "solid" there, so cutouts appear as literal gaps in the mesh.
+  const segU = 96, segV = Math.max(8, Math.round(depth/4));
+  const circumference = 2*Math.PI*R;
+  const positions=[], normals=[], indices=[];
+
+  function sampleSolid(u,v){
+    // u wraps around [0,circumference), v in [0,depth]
+    let uu = ((u % circumference)+circumference) % circumference;
+    const px = Math.min(pipePanel.w-1, Math.max(0, Math.floor((uu/circumference)*pipePanel.w)));
+    const py = Math.min(pipePanel.h-1, Math.max(0, Math.floor((v/depth)*pipePanel.h)));
+    return pipePanel.mask[py*pipePanel.w+px] === 0; // 0 = solid material, 1 = cutout
+  }
+
+  let vi=0;
+  for(let i=0;i<segU;i++){
+    const u0 = (i/segU)*circumference, u1 = ((i+1)/segU)*circumference;
+    const th0 = u0/R, th1 = u1/R;
+    for(let j=0;j<segV;j++){
+      const v0 = (j/segV)*depth, v1 = ((j+1)/segV)*depth;
+      const uc = (u0+u1)/2, vc = (v0+v1)/2;
+      if(!sampleSolid(uc,vc)) continue; // cutout cell -> leave a gap
+      const p00=[R*Math.cos(th0), R*Math.sin(th0), v0];
+      const p10=[R*Math.cos(th1), R*Math.sin(th1), v0];
+      const p11=[R*Math.cos(th1), R*Math.sin(th1), v1];
+      const p01=[R*Math.cos(th0), R*Math.sin(th0), v1];
+      const nx=Math.cos((th0+th1)/2), ny=Math.sin((th0+th1)/2);
+      for(const p of [p00,p10,p11,p01]) positions.push(...p);
+      for(let k=0;k<4;k++) normals.push(nx,ny,0);
+      indices.push(vi,vi+1,vi+2, vi,vi+2,vi+3);
+      vi+=4;
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals,3));
+  geo.setIndex(indices);
+  const mat = new THREE.MeshStandardMaterial({color:matColor, roughness:0.85, metalness:0.05, side:THREE.DoubleSide});
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  return mesh;
+}
+
 function buildPanelMesh(polyOutlineMM, holePolysMM, offsetU, thickness, basis, position, matColor){
   const shape = new THREE.Shape();
   polyOutlineMM.forEach(([u,v],i)=>{ const x=u-offsetU; if(i===0) shape.moveTo(x,v); else shape.lineTo(x,v); });
@@ -1319,6 +1496,14 @@ function updateWallTexture(proj, boxW, boxH, boxD, depth){
     const wy = -(py/res-0.5)*viewH;
     const bx = wx*cosA - wy*sinA;
     const by = wx*sinA + wy*cosA;
+    if(proj.isPipe){
+      const hit = raycastCylinder(Lx,Ly,Lz, bx,by,0, proj.R, boxD);
+      if(!hit) return 0;
+      const p = proj.panels.pipe;
+      let ppx = Math.floor((hit.u/proj.circumference)*p.w), ppy=Math.floor((hit.v/boxD)*p.h);
+      if(ppx>=0&&ppx<p.w&&ppy>=0&&ppy<p.h) return p.mask[ppy*p.w+ppx];
+      return 0;
+    }
     const hit = raycastPanel(Lx,Ly,Lz, bx,by,0, boxW,boxH,boxD);
     if(!hit) return 0; // no panel intersection = physically behind/blocked by the box -> always dark
     const p = proj.panels[hit.panel];
@@ -1393,6 +1578,10 @@ function rebuild3DScene(proj){
       m.geometry.dispose(); m.material.dispose();
     }
 
+    if(proj.isPipe){
+      const mesh = buildPipeMesh3D(proj.panels.pipe, proj.R, depth, 0x2a3838);
+      scene3D.panelGroup.add(mesh);
+    } else {
     const rectOutline = (dimW)=>[[0,0],[dimW,0],[dimW,depth],[0,depth]];
     const panelColor = 0x2a3838;
 
@@ -1430,6 +1619,7 @@ function rebuild3DScene(proj){
         {x:V3(1,0,0), y:V3(0,1,0), z:V3(0,0,-1)}, V3(0,0,0), 0x1f2b2b);
       scene3D.panelGroup.add(backMesh);
     }
+    } // end flat-panel branch
 
     // LED position + light
     scene3D.ledLight.position.set(proj.led.x, proj.led.y, proj.led.z);
@@ -1445,7 +1635,7 @@ function rebuild3DScene(proj){
     updateWallTexture(proj, boxW, boxH, boxD, depth);
 
     // frame the camera around the box the first time (or if size changed a lot)
-    const diag = Math.hypot(boxW,boxH,depth);
+    const diag = proj.isPipe ? Math.hypot(proj.R*2, proj.R*2, depth) : Math.hypot(boxW,boxH,depth);
     scene3D.camState.target.set(0,0,depth/2);
     const desiredR = Math.max(150, diag*1.6);
     scene3D.defaultRadius = desiredR;
@@ -1462,7 +1652,47 @@ function rebuild3DScene(proj){
   }
 }
 
+function renderPipePanel(proj){
+  const grid = $('panelGrid');
+  grid.innerHTML='';
+  const p = proj.panels.pipe;
+  const localW = proj.circumference, localD = proj.effectiveDepth;
+  const outline = buildPlainOutline(localW, localD); // pipes never get finger-joint interlock
+  const cutouts = panelCutoutPaths(p.mask, p.w, p.h, localW, localD);
+  const pad = 4;
+  const vbW = localW+pad*2, vbH = localD+pad*2;
+  const outlineD = pathDFromPoints(outline.map(pt=>[pt[0]+pad, pt[1]+pad]), true);
+  const cutD = cutouts.map(d=>{
+    return d.replace(/(-?\d+\.?\d*) (-?\d+\.?\d*)/g, (m,a,b)=>`${(parseFloat(a)+pad).toFixed(2)} ${(parseFloat(b)+pad).toFixed(2)}`);
+  }).join(' ');
+  const clearMM = Math.max(0, Math.min(state.deviceH, localD));
+  const clearLineD = clearMM>0
+    ? `<line x1="${pad}" y1="${pad+clearMM}" x2="${pad+localW}" y2="${pad+clearMM}" stroke="#ffcc55" stroke-width="0.7" stroke-dasharray="2,1.5"/>
+       <text x="${vbW-pad+2}" y="${pad+clearMM-1.5}" font-size="3.4" fill="#ffcc55" text-anchor="end">device ${Math.round(clearMM)}mm</text>`
+    : '';
+
+  const card = document.createElement('div');
+  card.className='card overflow-hidden col-span-2';
+  card.innerHTML = `
+    <div class="px-3 pt-3 flex justify-between items-center">
+      <span class="text-xs font-semibold">PIPE — UNROLLED WRAP</span>
+      <span class="panel-preview-label">${Math.round(localW)}×${Math.round(localD)}MM · R${Math.round(proj.R)}</span>
+    </div>
+    <div class="p-2">
+      <svg viewBox="0 0 ${vbW} ${vbH}" style="width:100%; background:#0c1315; border-radius:8px;">
+        <text x="${vbW/2}" y="${pad-4}" font-size="4" fill="#5c716d" text-anchor="middle">WALL SIDE ▲</text>
+        <path d="${outlineD}" fill="none" stroke="#3a4a48" stroke-width="0.8"/>
+        <path d="${cutD}" fill="none" stroke="#ff3f63" stroke-width="0.9"/>
+        ${clearLineD}
+        <text x="${vbW/2}" y="${vbH-3}" font-size="4" fill="#5c716d" text-anchor="middle">FRONT / OPENING ▼</text>
+      </svg>
+    </div>
+    <div class="px-3 pb-3 text-xs subtle">Wrap this pattern around the pipe's circumference (${Math.round(localW)}mm) — the left and right edges meet back-to-back at the seam.</div>`;
+  grid.appendChild(card);
+}
+
 function renderPanels(proj){
+  if(proj.isPipe){ renderPipePanel(proj); return; }
   const order = [
     {key:'top', label:'Top', dimW:state.boxW},
     {key:'right', label:'Right', dimW:state.boxH},
@@ -1558,6 +1788,26 @@ function renderPanels(proj){
 /* ============================================================
    EXPORT
    ============================================================ */
+function buildPipeCylinderLayout(){
+  // Pipe Mode export: a single rectangular pattern, width = pipe
+  // circumference, height = the effective depth. No finger joints (wraps
+  // around an existing round pipe). The left/right edges are the seam where
+  // the paper wraps back to meet itself — draw a dashed guide there too, for
+  // consistency with the box-strip mode's corner guides.
+  const proj = state.panels;
+  const pipePanel = proj.panels.pipe;
+  const localW = proj.circumference;
+  const localD = proj.effectiveDepth;
+
+  const outline = buildPlainOutline(localW, localD);
+  const cutouts = getCutoutPolygonsMM(pipePanel, localW, state.boxD);
+
+  const placed = [{ key:'pipe', outline, cutouts, x0:0, x1:localW }];
+  const guides = [[[0,0],[0,localD]], [[localW,0],[localW,localD]]]; // seam guide on both outer edges
+
+  return { placed, totalW:localW, totalH:localD, guides };
+}
+
 function buildPipeBoxStrip(){
   // Box Mode export: ONE continuous strip, width = exact box circumference
   // (boxW + boxH + boxW + boxH), height = the panel depth. No finger joints
@@ -1610,6 +1860,7 @@ function buildPipeBoxStrip(){
 }
 
 function buildNestedLayout(){
+  if(state.pipeMode) return buildPipeCylinderLayout();
   if(state.boxMode) return buildPipeBoxStrip();
   const proj = state.panels;
   const boxW=state.boxW, boxH=state.boxH, boxD=state.boxD, thick=state.thick, tab=state.tab;
