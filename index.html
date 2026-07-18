@@ -64,7 +64,7 @@
 <body class="pb-24">
 
 <!-- HEADER -->
-<div class="sticky top-0 z-30" style="background:rgba(10,14,16,.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--line);">
+<div id="appHeader" class="sticky top-0 z-30" style="background:rgba(10,14,16,.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--line);">
   <div class="flex items-center justify-between px-4 py-4 max-w-3xl mx-auto">
     <div>
       <div class="text-xl font-bold" style="letter-spacing:-.01em;">Shadow Box</div>
@@ -150,30 +150,32 @@
     </div>
   </div>
 
-  <!-- 3D BOX PREVIEW -->
-  <div class="card">
-    <div class="flex items-center justify-between px-4 pt-4">
-      <span class="eyebrow">3D Preview</span>
-      <button id="btnResetView" class="text-xs subtle flex items-center gap-1" style="background:none; border:none;">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
-        Reset view
-      </button>
-    </div>
-    <div class="p-4 pt-2">
-      <div class="rounded-xl overflow-hidden" style="background:#04100c; aspect-ratio:1/1; position:relative; touch-action:none;">
-        <canvas id="scene3d" style="width:100%; height:100%; display:block;"></canvas>
+  <!-- 3D BOX PREVIEW + BOX SETTINGS (wrapped together so the preview can stick
+       while you scroll through settings, then release once settings end) -->
+  <div style="position:relative;">
+    <div id="preview3dSticky" class="card" style="position:sticky; top:calc(var(--header-h, 72px) + 8px); z-index:10; margin-bottom:16px;">
+      <div class="flex items-center justify-between px-4 pt-4">
+        <span class="eyebrow">3D Preview</span>
+        <button id="btnResetView" class="text-xs subtle flex items-center gap-1" style="background:none; border:none;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
+          Reset view
+        </button>
       </div>
-      <div class="text-xs subtle mt-2 text-center">Drag to rotate · pinch or scroll to zoom · built from the actual cutout data</div>
-    </div>
-  </div>
-
-  <!-- BOX SETTINGS -->
-  <div class="card">
-    <div class="section-head" onclick="null">
-      <span class="eyebrow">Box Settings</span>
+      <div class="p-4 pt-2">
+        <div class="rounded-xl overflow-hidden" style="background:#04100c; aspect-ratio:1/1; max-height:36vh; position:relative; touch-action:none;">
+          <canvas id="scene3d" style="width:100%; height:100%; display:block;"></canvas>
+        </div>
+        <div class="text-xs subtle mt-2 text-center">Drag to rotate · pinch or scroll to zoom · stays pinned while you adjust settings below</div>
+      </div>
     </div>
 
-    <div class="border-t" style="border-color:var(--line);" id="sec-dims">
+    <!-- BOX SETTINGS -->
+    <div class="card">
+      <div class="section-head" onclick="null">
+        <span class="eyebrow">Box Settings</span>
+      </div>
+
+      <div class="border-t" style="border-color:var(--line);" id="sec-dims" data-group="boxsettings">
       <div class="section-head" onclick="toggleSection('sec-dims')">
         <span class="text-sm font-semibold">Box Dimensions</span>
         <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
@@ -201,7 +203,7 @@
       </div>
     </div>
 
-    <div class="border-t" style="border-color:var(--line);" id="sec-mounting">
+    <div class="border-t collapsed" style="border-color:var(--line);" id="sec-mounting" data-group="boxsettings">
       <div class="section-head" onclick="toggleSection('sec-mounting')">
         <span class="text-sm font-semibold">Mounting Method</span>
         <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
@@ -226,7 +228,7 @@
       </div>
     </div>
 
-    <div class="border-t" style="border-color:var(--line);" id="sec-control">
+    <div class="border-t collapsed" style="border-color:var(--line);" id="sec-control" data-group="boxsettings">
       <div class="section-head" onclick="toggleSection('sec-control')">
         <span class="text-sm font-semibold">Control Box (Electronics)</span>
         <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
@@ -241,7 +243,7 @@
       </div>
     </div>
 
-    <div class="border-t collapsed" style="border-color:var(--line);" id="sec-led">
+    <div class="border-t collapsed" style="border-color:var(--line);" id="sec-led" data-group="boxsettings">
       <div class="section-head" onclick="toggleSection('sec-led')">
         <span class="text-sm font-semibold">LED Position</span>
         <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
@@ -265,7 +267,7 @@
       </div>
     </div>
 
-    <div class="border-t collapsed" style="border-color:var(--line);" id="sec-boxpos">
+    <div class="border-t collapsed" style="border-color:var(--line);" id="sec-boxpos" data-group="boxsettings">
       <div class="section-head" onclick="toggleSection('sec-boxpos')">
         <span class="text-sm font-semibold">Box Position</span>
         <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
@@ -294,7 +296,7 @@
       </div>
     </div>
 
-    <div class="border-t collapsed" style="border-color:var(--line);" id="sec-material">
+    <div class="border-t collapsed" style="border-color:var(--line);" id="sec-material" data-group="boxsettings">
       <div class="section-head" onclick="toggleSection('sec-material')">
         <span class="text-sm font-semibold">Material</span>
         <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
@@ -317,6 +319,7 @@
         <div class="text-xs subtle -mt-2">Off — every panel keeps its full declared Depth, even past where the silhouette content ends (default). On — each panel's own physical length is cut right at the deepest real cutout (just a 1mm hairline left), removing the leftover rectangular frame instead of carrying it all the way to the front opening. All 4 side panels are trimmed to the same length so the box still closes evenly.</div>
       </div>
     </div>
+  </div>
   </div>
 
   <!-- LASER CUT PANELS -->
@@ -371,7 +374,29 @@ const state = {
 const DEG = Math.PI/180;
 
 function $(id){ return document.getElementById(id); }
-function toggleSection(id){ $(id).classList.toggle('collapsed'); }
+function toggleSection(id){
+  const el = $(id);
+  const wasCollapsed = el.classList.contains('collapsed');
+  const group = el.dataset.group;
+  if(group && wasCollapsed){
+    // Opening this one — close every other section in the same group first,
+    // so only one settings panel is expanded at a time. This keeps the
+    // scrollable area short enough on a phone screen that the sticky 3D
+    // preview above it and the panel you're actually editing usually both
+    // fit in view together, instead of the settings list growing tall and
+    // pushing everything below the preview off-screen.
+    document.querySelectorAll(`[data-group="${group}"]`).forEach(other=>{
+      if(other!==el) other.classList.add('collapsed');
+    });
+  }
+  el.classList.toggle('collapsed');
+}
+
+function updateHeaderHeightVar(){
+  const h = $('appHeader');
+  if(h) document.documentElement.style.setProperty('--header-h', h.offsetHeight+'px');
+}
+window.addEventListener('resize', updateHeaderHeightVar);
 function toggleBool(key){
   state[key] = !state[key];
   $('t-invert').classList.toggle('on', state.invert);
@@ -628,27 +653,27 @@ function loadImageFile(file){
   img.src = url;
 }
 
-/* build a default placeholder silhouette so the app has something to show before upload */
-function buildPlaceholderSilhouette(){
-  const c = document.createElement('canvas'); c.width=400; c.height=400;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle='#fff'; ctx.fillRect(0,0,400,400);
-  ctx.fillStyle='#000';
-  ctx.beginPath();
-  ctx.arc(200,150,70,0,Math.PI*2); // head
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(140,210); ctx.quadraticCurveTo(120,320,150,380); ctx.lineTo(250,380);
-  ctx.quadraticCurveTo(280,320,260,210); ctx.closePath(); ctx.fill();
-  const img = new Image(); img.src = c.toDataURL();
-  return img;
-}
-
 /* ============================================================
    PIPELINE: threshold -> noise removal -> mask
    ============================================================ */
 function runPipeline(){
-  if(!state.hasImage && !sourceImg) sourceImg = buildPlaceholderSilhouette();
+  if(!state.hasImage){
+    // No image uploaded yet — don't silently project a placeholder sample
+    // image (that produced holes/starburst patterns in the previews before
+    // the person had chosen anything). Keep every panel fully solid instead,
+    // and show a plain prompt in place of the source-threshold preview.
+    state.mask = new Uint8Array([1]); state.maskW = 1; state.maskH = 1;
+    const cv = $('srcCanvas');
+    const ctx = cv.getContext('2d');
+    cv.width = 400; cv.height = 300;
+    ctx.fillStyle = '#0c1315'; ctx.fillRect(0,0,400,300);
+    ctx.fillStyle = '#5c716d'; ctx.font = '15px -apple-system, sans-serif'; ctx.textAlign='center';
+    ctx.fillText('Upload an image to see it here', 200, 155);
+    cv.style.width = '100%'; cv.style.maxWidth = '420px';
+    computeProjectionAndRender();
+    return;
+  }
+
   const res = Math.round(state.resolution);
 
   // SVGs (and occasionally other files) can report naturalWidth/naturalHeight
@@ -752,6 +777,67 @@ function raycastPanel(Lx,Ly,Lz, Qx,Qy,Qz, boxW,boxH,boxD){
     }
   }
   return null;
+}
+
+// Where two adjacent side panels meet at a box corner, the ray-to-panel
+// assignment flips abruptly: right at that seam, BOTH panels' u-coordinate
+// converges to their own edge (u≈dimW), but each panel's cutout mask was
+// voted on completely independently — so the two sides of that exact seam
+// line don't visually agree, showing up as a sharp radiating line from each
+// of the box's 4 corners (8 rays total = the reported "8-point star").
+// Blurring alone can't fix a systematic mismatch between the two panels;
+// this instead finds BOTH candidate panels near the seam and blends them,
+// so the seam reads as a soft, physically-motivated transition instead of a
+// jagged line. Cosmetic only (3D wall texture) — never touches export data.
+function raycastPanelSoft(Lx,Ly,Lz, Qx,Qy,Qz, boxW,boxH,boxD, seamFrac){
+  const dx=Qx-Lx, dy=Qy-Ly, dz=Qz-Lz;
+  const cands=[];
+  if(Math.abs(dx)>1e-9){
+    cands.push({t:(boxW/2-Lx)/dx, type:'right'});
+    cands.push({t:(-boxW/2-Lx)/dx, type:'left'});
+  }
+  if(Math.abs(dy)>1e-9){
+    cands.push({t:(boxH/2-Ly)/dy, type:'top'});
+    cands.push({t:(-boxH/2-Ly)/dy, type:'bottom'});
+  }
+  cands.sort((a,b)=>a.t-b.t);
+  let primary=null;
+  for(const c of cands){
+    if(c.t<=1e-6 || c.t>1.000001) continue;
+    const px=Lx+dx*c.t, py=Ly+dy*c.t, pz=Lz+dz*c.t;
+    if(pz<0||pz>boxD) continue;
+    const isLR = (c.type==='right'||c.type==='left');
+    const dimW = isLR ? boxH : boxW;
+    const uRaw = isLR ? (py+boxH/2) : (px+boxW/2);
+    const bound = isLR ? boxH/2 : boxW/2;
+    const boundVal = isLR ? py : px;
+    if(boundVal < -bound-1e-6 || boundVal > bound+1e-6) continue;
+    primary = {panel:c.type, u:uRaw, v:pz, dimW};
+    break;
+  }
+  if(!primary) return null;
+  const distToEdge = Math.min(primary.u, primary.dimW-primary.u);
+  const seamWidth = primary.dimW*seamFrac;
+  if(distToEdge >= seamWidth) return {a:primary, b:null, blend:0};
+
+  // Near a seam: the geometrically adjacent panel is whichever OTHER
+  // candidate is nearest in t (even though it's marginally out-of-bounds by
+  // the same epsilon that let this one in) — clamp its u into range and use
+  // it as the blend partner.
+  for(const c of cands){
+    if(c.type===primary.panel) continue;
+    if(c.t<=1e-6 || c.t>1.000001) continue;
+    const px=Lx+dx*c.t, py=Ly+dy*c.t, pz=Lz+dz*c.t;
+    if(pz<0||pz>boxD) continue;
+    const isLR = (c.type==='right'||c.type==='left');
+    const dimW = isLR ? boxH : boxW;
+    const uRaw = isLR ? (py+boxH/2) : (px+boxW/2);
+    const uClamped = Math.min(dimW, Math.max(0, uRaw));
+    const secondary = {panel:c.type, u:uClamped, v:pz, dimW};
+    const blend = 0.5*(1 - distToEdge/seamWidth); // 0 at seamWidth boundary, up to 0.5 exactly at the corner
+    return {a:primary, b:secondary, blend};
+  }
+  return {a:primary, b:null, blend:0};
 }
 
 // Pipe Mode: single curved wall instead of 4 flat panels. Ray from LED L to
@@ -1491,6 +1577,12 @@ function updateWallTexture(proj, boxW, boxH, boxD, depth){
   // edges instead of hard raster jaggies, and less chance of a thin sliver of
   // content falling entirely between sample points.
   const SS=2, offs=[-0.25,0.25];
+  const SEAM_FRAC = 0.03; // width of the corner blend zone, as a fraction of each panel's own dimension
+  function sampleMaskAt(p, u, v, dimW){
+    let ppx = Math.floor((u/dimW)*p.w), ppy=Math.floor((v/boxD)*p.h);
+    if(ppx>=0&&ppx<p.w&&ppy>=0&&ppy<p.h) return p.mask[ppy*p.w+ppx];
+    return 0;
+  }
   function sampleLit(px,py){
     const wx = (px/res-0.5)*viewW;
     const wy = -(py/res-0.5)*viewH;
@@ -1499,17 +1591,18 @@ function updateWallTexture(proj, boxW, boxH, boxD, depth){
     if(proj.isPipe){
       const hit = raycastCylinder(Lx,Ly,Lz, bx,by,0, proj.R, boxD);
       if(!hit) return 0;
-      const p = proj.panels.pipe;
-      let ppx = Math.floor((hit.u/proj.circumference)*p.w), ppy=Math.floor((hit.v/boxD)*p.h);
-      if(ppx>=0&&ppx<p.w&&ppy>=0&&ppy<p.h) return p.mask[ppy*p.w+ppx];
-      return 0;
+      return sampleMaskAt(proj.panels.pipe, hit.u, hit.v, proj.circumference);
     }
-    const hit = raycastPanel(Lx,Ly,Lz, bx,by,0, boxW,boxH,boxD);
-    if(!hit) return 0; // no panel intersection = physically behind/blocked by the box -> always dark
-    const p = proj.panels[hit.panel];
-    let ppx = Math.floor((hit.u/p.dimW)*p.w), ppy=Math.floor((hit.v/boxD)*p.h);
-    if(ppx>=0&&ppx<p.w&&ppy>=0&&ppy<p.h) return p.mask[ppy*p.w+ppx];
-    return 0;
+    const soft = raycastPanelSoft(Lx,Ly,Lz, bx,by,0, boxW,boxH,boxD, SEAM_FRAC);
+    if(!soft) return 0; // no panel intersection = physically behind/blocked by the box -> always dark
+    const va = sampleMaskAt(proj.panels[soft.a.panel], soft.a.u, soft.a.v, soft.a.dimW);
+    if(!soft.b) return va;
+    const vb = sampleMaskAt(proj.panels[soft.b.panel], soft.b.u, soft.b.v, soft.b.dimW);
+    // Blend the two adjacent panels' values right at the corner seam instead
+    // of hard-switching — this is what actually removes the radiating
+    // seam-line artifact (the reported 8-point star), rather than just
+    // blurring a discontinuity that was still there underneath.
+    return va*(1-soft.blend) + vb*soft.blend;
   }
 
   // Build the raw blend-factor grid first (0=dark..1=teal), separately from
@@ -2100,6 +2193,7 @@ function downloadPDF(){
 /* ============================================================
    INIT
    ============================================================ */
+updateHeaderHeightVar();
 runPipeline();
 </script>
 </body>
