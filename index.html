@@ -934,7 +934,12 @@ function computeProjectionCylinder(){
   const ph = Math.max(4, Math.round(D*PX_PER_MM));
   const total = new Uint32Array(pw*ph), lit = new Uint32Array(pw*ph);
 
-  const superSample = state.scale > 5 ? 2 : 1;
+  // Same reasoning as the flat-panel mode: supersample count is computed
+  // from the actual source/destination density ratio (diameter here plays
+  // the role boxW/boxH play for flat panels), with a total ray-count budget
+  // cap — not a fixed guess, and not a per-axis cap that could shrink faster
+  // than the actual need as Raster Resolution goes up.
+  const superSample = computeAdaptiveSuperSample(2*R, state.scale, Math.max(mw,mh));
   const sw = mw*superSample, sh = mh*superSample;
 
   for(let sy=0; sy<sh; sy++){
@@ -986,6 +991,30 @@ function computeProjectionCylinder(){
   return { panels:{pipe:pipePanel}, led:{x:Lx,y:Ly,z:Lz}, wallImgW, wallImgH, effectiveDepth, isPipe:true, circumference, R };
 }
 
+const TOTAL_RAY_BUDGET = 6_000_000; // hard ceiling on total ray casts per recompute, kept mobile-safe
+
+// Computes how many rays to cast per source-mask pixel (in each axis) so the
+// panel raster actually gets adequate coverage, instead of a fixed guess.
+//
+// idealSuperSample: the box's own footprint occupies roughly a 1/scale
+// fraction of the wall image along a given axis (wallImgW = boxDim*scale),
+// so only about (sourceRes/scale) of the source pixels actually land inside
+// the box's angular window — that shrinking pool, not the raw source
+// resolution, is what needs to cover the panel's PX_PER_MM raster. Both
+// "shrinks the usable source pool" (scale) and "how fine the target grid
+// is" (panelDim*PX_PER_MM) push the ratio up; a finer source raster
+// (sourceRes) is what's actually available to draw from, so it divides in.
+//
+// maxSupersampleByBudget: caps the TOTAL number of rays cast
+// (sourceRes^2 * superSample^2), not any single axis — capping per-axis
+// would mean raising Raster Resolution shrinks the cap just as fast as it
+// raises the ideal need, cancelling itself out and never actually helping.
+function computeAdaptiveSuperSample(boxDimMax, scale, sourceRes){
+  const idealSuperSample = (PX_PER_MM * boxDimMax * scale) / Math.max(1, sourceRes);
+  const maxSupersampleByBudget = Math.sqrt(TOTAL_RAY_BUDGET / Math.max(1, sourceRes*sourceRes));
+  return Math.max(1, Math.min(Math.ceil(idealSuperSample), Math.floor(maxSupersampleByBudget)));
+}
+
 function computeProjection(){
   const boxW=state.boxW, boxH=state.boxH, boxD=state.boxD;
   const ledCorrection = state.thick*2;
@@ -1005,14 +1034,14 @@ function computeProjection(){
   };
   for(const k in panelsRaw){ panelsRaw[k].total=new Uint32Array(panelsRaw[k].w*panelsRaw[k].h); panelsRaw[k].lit=new Uint32Array(panelsRaw[k].w*panelsRaw[k].h); }
 
-  // At high Shadow Scale, the wall image is much bigger than the box while
-  // the source mask keeps the SAME pixel count — so each panel only catches
-  // a thinning, patchier subset of rays, leaving scattered zero-vote "holes"
-  // in the panel raster (the speckled/jagged noise seen around the
-  // silhouette at high scale). Supersampling the ray grid (independent of
-  // the source mask's own resolution) keeps ray density adequate as scale
-  // grows, without requiring the user to also raise Raster Resolution.
-  const superSample = state.scale > 5 ? 2 : 1;
+  // At high Shadow Scale (or a large box relative to source resolution), the
+  // wall image is much bigger than the box while the source mask keeps the
+  // SAME pixel count — so each panel only catches a thinning, patchier
+  // subset of rays, leaving scattered zero-vote "holes" in the panel raster
+  // (the speckled/jagged noise seen at high scale). Supersample count is now
+  // computed from the actual source/destination density ratio (not a fixed
+  // guess), with a TOTAL ray-count budget cap so it can't blow up.
+  const superSample = computeAdaptiveSuperSample(Math.max(boxW,boxH), state.scale, Math.max(mw,mh));
   const sw = mw*superSample, sh = mh*superSample;
 
   for(let sy=0; sy<sh; sy++){
