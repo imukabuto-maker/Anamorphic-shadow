@@ -1535,56 +1535,80 @@ function initThreeScene(){
   resize();
 }
 
-function warpFlatGeometryToCylinder(geo, R){
-  // Takes a flat ExtrudeGeometry built in (u, v, extrudeDepth) space and bends
-  // it onto a cylinder of radius R: u becomes the arc-length position
-  // (theta = u/R), v stays as the axial/depth coordinate, and the extrusion
-  // depth becomes a small radial offset — so material extruded "outward"
-  // sits at radius R+depth, matching how the flat panels extrude outward too.
-  const pos = geo.attributes.position;
-  for(let i=0;i<pos.count;i++){
-    const u = pos.getX(i), v = pos.getY(i), z = pos.getZ(i);
-    const theta = u/R;
-    const radius = R + z;
-    pos.setXYZ(i, radius*Math.cos(theta), radius*Math.sin(theta), v);
+function pointInPolygon(x, y, poly){
+  let inside = false;
+  for(let i=0, j=poly.length-1; i<poly.length; j=i++){
+    const xi=poly[i][0], yi=poly[i][1], xj=poly[j][0], yj=poly[j][1];
+    const intersect = ((yi>y) !== (yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi);
+    if(intersect) inside = !inside;
   }
-  pos.needsUpdate = true;
-  geo.computeVertexNormals(); // original flat-extrusion normals are invalid after bending
-  return geo;
+  return inside;
 }
 
 function buildPipeMeshFromPolygons(circumference, depth, holePolysMM, matColor){
-  // Same smooth-vector approach as buildPanelMesh (Shape + holes, both taken
-  // from the exact same getCutoutPolygonsMM() data that feeds the 2D panel
-  // preview and the SVG/DXF/PDF export) — this is what makes the 3D mesh's
-  // cutout edges match the laser-cut panel exactly, instead of the old
-  // blocky/staircased look from sampling the raw pixel grid directly.
+  // Builds the tube wall as a fine regular grid of small quads wrapped
+  // directly onto the cylinder (each quad computed straight in cylindrical
+  // coordinates, never via a flat-then-bend step). A cutout hole is applied
+  // by testing each grid cell's center against the SAME smooth vector
+  // polygons (getCutoutPolygonsMM) used by the 2D panel preview and export,
+  // so the edges still follow the true smooth shape at whatever resolution
+  // the grid provides — but because every quad only spans one small local
+  // grid cell, there's no possibility of a single triangle spanning a huge
+  // angular range.
   //
-  // IMPORTANT: the outer boundary must be subdivided into many points along
-  // its circumferential (u) edges. A plain 4-corner rectangle is fine for a
-  // FLAT panel, but once warped onto a cylinder, a long straight edge with
-  // no intermediate points collapses toward a single chord between its two
-  // (nearly coincident, since u=0 and u=circumference are the same angle)
-  // endpoints — that's what produced the wedge/triangle artifact instead of
-  // a round tube.
-  const shape = new THREE.Shape();
-  const segU = 96;
-  shape.moveTo(0,0);
-  for(let i=1;i<=segU;i++) shape.lineTo((i/segU)*circumference, 0);          // bottom edge (v=0), subdivided
-  shape.lineTo(circumference, depth);
-  for(let i=1;i<=segU;i++) shape.lineTo(circumference - (i/segU)*circumference, depth); // top edge (v=depth), subdivided
-  shape.lineTo(0, 0);
-  shape.closePath();
-  holePolysMM.forEach(hole=>{
-    const path = new THREE.Path();
-    hole.forEach(([u,v],i)=>{ if(i===0) path.moveTo(u,v); else path.lineTo(u,v); });
-    path.closePath();
-    shape.holes.push(path);
-  });
+  // (An earlier version built a flat Shape+holes with THREE.ExtrudeGeometry
+  // and warped the result afterward. That's correct for FLAT panels, but a
+  // flat polygon's triangulator (earcut) has no idea the shape is about to
+  // be bent into a tube — with a plain rectangle having many points along
+  // its long top/bottom edges but only 2 on the short left/right edges, it
+  // could legally choose a "fan" triangulation connecting far-apart points
+  // across the rectangle. Perfectly valid in flat space, but once bent onto
+  // the cylinder those long diagonal triangles cut straight across the
+  // tube's interior like a chord — that's what produced the wedge artifact.)
+  const segU = 120, segV = Math.max(10, Math.round(depth/2));
   const wallThickness = Math.max(1, state.thick||3);
-  const geo = new THREE.ExtrudeGeometry(shape, {depth:wallThickness, bevelEnabled:false, curveSegments:1, steps:1});
   const R = circumference/(2*Math.PI);
-  warpFlatGeometryToCylinder(geo, R);
+  const Rout = R + wallThickness;
+
+  function isSolid(u, v){
+    for(const hole of holePolysMM){ if(pointInPolygon(u, v, hole)) return false; }
+    return true;
+  }
+
+  const positions=[], normals=[], indices=[];
+  let vi=0;
+  function pushQuad(p00,p10,p11,p01, nrm){
+    for(const p of [p00,p10,p11,p01]) positions.push(...p);
+    for(let k=0;k<4;k++) normals.push(...nrm);
+    indices.push(vi,vi+1,vi+2, vi,vi+2,vi+3);
+    vi+=4;
+  }
+
+  for(let i=0;i<segU;i++){
+    const u0=(i/segU)*circumference, u1=((i+1)/segU)*circumference;
+    const th0=u0/R, th1=u1/R;
+    const c0=Math.cos(th0), s0=Math.sin(th0), c1=Math.cos(th1), s1=Math.sin(th1);
+    for(let j=0;j<segV;j++){
+      const v0=(j/segV)*depth, v1=((j+1)/segV)*depth;
+      const uc=(u0+u1)/2, vc=(v0+v1)/2;
+      if(!isSolid(uc,vc)) continue; // cutout cell -> leave a gap
+
+      // inner surface (radius R)
+      const i00=[R*c0,R*s0,v0], i10=[R*c1,R*s1,v0], i11=[R*c1,R*s1,v1], i01=[R*c0,R*s0,v1];
+      const nIn=[-Math.cos((th0+th1)/2), -Math.sin((th0+th1)/2), 0];
+      pushQuad(i00,i01,i11,i10, nIn); // wound to face inward
+
+      // outer surface (radius R+thickness)
+      const o00=[Rout*c0,Rout*s0,v0], o10=[Rout*c1,Rout*s1,v0], o11=[Rout*c1,Rout*s1,v1], o01=[Rout*c0,Rout*s0,v1];
+      const nOut=[Math.cos((th0+th1)/2), Math.sin((th0+th1)/2), 0];
+      pushQuad(o00,o10,o11,o01, nOut); // wound to face outward
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals,3));
+  geo.setIndex(indices);
   const mat = new THREE.MeshStandardMaterial({color:matColor, roughness:0.85, metalness:0.05, side:THREE.DoubleSide});
   const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true; mesh.receiveShadow = true;
