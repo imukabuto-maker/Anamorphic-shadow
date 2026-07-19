@@ -914,6 +914,25 @@ function closeMask(mask,w,h,iterations){
   return m;
 }
 
+// Device Clearance — SHIFT mode: instead of clipping (deleting) whatever
+// cutout content originally fell inside the reserved wall-side depth, push
+// the ENTIRE pattern forward by clearRows so nothing is lost — content that
+// used to start at v=0 now starts at v=clearMM instead. Rows [0,clearRows)
+// are always forced solid (that's the point of the clearance). Content that
+// gets pushed past the panel's own raster height (i.e. the box isn't deep
+// enough to also fit the shifted pattern) is clipped at the FAR end instead
+// — the far/front-opening edge is the true physical limit, so that's a more
+// honest place to lose data than an arbitrary cut right after the wall.
+function shiftMaskByClearance(mask, w, h, clearRows){
+  if(clearRows<=0) return mask;
+  const shifted = new Uint8Array(w*h); // defaults to 0 = solid everywhere
+  for(let row=0; row<h-clearRows; row++){
+    const srcBase = row*w, dstBase = (row+clearRows)*w;
+    for(let col=0; col<w; col++) shifted[dstBase+col] = mask[srcBase+col];
+  }
+  return shifted;
+}
+
 // Pipe Mode: same LED raycasting idea as computeProjection(), but against a
 // single curved cylindrical wall instead of 4 flat panels. The "panel" here
 // is the pipe's surface unrolled flat: width = circumference (2*pi*R),
@@ -968,13 +987,10 @@ function computeProjectionCylinder(){
   const minComponent = Math.max(2,Math.round(PX_PER_MM*PX_PER_MM*0.15));
   const finalMask = new Uint8Array(pw*ph);
   for(let i=0;i<finalMask.length;i++) finalMask[i] = (total[i]>0 && (lit[i]/total[i])>=0.5) ? 1:0;
-  const closed = closeMask(finalMask, pw, ph, 1);
+  let closed = closeMask(finalMask, pw, ph, 1);
   removeSmallComponents(closed, pw, ph, minComponent, 'both');
   const clearRows = Math.round((clearMM/D)*ph);
-  for(let row=0; row<clearRows && row<ph; row++){
-    const base=row*pw;
-    for(let col=0; col<pw; col++) closed[base+col]=0;
-  }
+  closed = shiftMaskByClearance(closed, pw, ph, clearRows);
   removeSmallComponents(closed, pw, ph, minComponent, 'both');
 
   const pipePanel = {mask:closed, w:pw, h:ph, dimW:circumference, dimH:D, clearMM};
@@ -1080,22 +1096,19 @@ function computeProjection(){
     // Closing pass kept gentle (1 iteration) — thin, elongated details (like a
     // sword blade) can be only a couple of panel-pixels wide, and a stronger
     // closing + a large noise-removal threshold were quietly eating them.
-    const closed = closeMask(finalMask, p.w, p.h, 1);
-    removeSmallComponents(closed, p.w, p.h, minComponent, 'both');
+    const closed0 = closeMask(finalMask, p.w, p.h, 1);
+    removeSmallComponents(closed0, p.w, p.h, minComponent, 'both');
 
     // Device clearance zone: v (depth) runs 0=wall-side -> boxD=front/opening,
-    // which maps to row index 0 -> p.h. Blank out every row inside the
-    // reserved depth so the controller/driver never collides with a cutout.
+    // which maps to row index 0 -> p.h. Rows inside the reserved depth are
+    // always forced solid so the controller/driver never collides with a
+    // cutout — SHIFT mode additionally pushes the rest of the pattern
+    // forward by that same amount, instead of deleting whatever content
+    // originally fell inside the clearance zone.
     const clearRows = Math.round((clearMM/boxD)*p.h);
-    for(let row=0; row<clearRows && row<p.h; row++){
-      const base = row*p.w;
-      for(let col=0; col<p.w; col++) closed[base+col]=0;
-    }
-    // The hard cut above can slice through real content or leave tiny
-    // fragments right along that new boundary — clean up again so nothing
-    // jagged survives right at the clearance line (this was showing up as a
-    // scribbly "noise" patch that looked like a light leak, but was really
-    // just an un-cleaned edge artifact from the forced cut).
+    const closed = shiftMaskByClearance(closed0, p.w, p.h, clearRows);
+    // Re-clean after the shift so nothing jagged survives right at the new
+    // clearance boundary (a hard row-boundary can leave tiny fragments there).
     removeSmallComponents(closed, p.w, p.h, minComponent, 'both');
 
     result[k]={mask:closed, w:p.w, h:p.h, dimW:p.dimW, dimH:boxD, clearMM};
@@ -1546,8 +1559,21 @@ function buildPipeMeshFromPolygons(circumference, depth, holePolysMM, matColor){
   // preview and the SVG/DXF/PDF export) — this is what makes the 3D mesh's
   // cutout edges match the laser-cut panel exactly, instead of the old
   // blocky/staircased look from sampling the raw pixel grid directly.
+  //
+  // IMPORTANT: the outer boundary must be subdivided into many points along
+  // its circumferential (u) edges. A plain 4-corner rectangle is fine for a
+  // FLAT panel, but once warped onto a cylinder, a long straight edge with
+  // no intermediate points collapses toward a single chord between its two
+  // (nearly coincident, since u=0 and u=circumference are the same angle)
+  // endpoints — that's what produced the wedge/triangle artifact instead of
+  // a round tube.
   const shape = new THREE.Shape();
-  shape.moveTo(0,0); shape.lineTo(circumference,0); shape.lineTo(circumference,depth); shape.lineTo(0,depth);
+  const segU = 96;
+  shape.moveTo(0,0);
+  for(let i=1;i<=segU;i++) shape.lineTo((i/segU)*circumference, 0);          // bottom edge (v=0), subdivided
+  shape.lineTo(circumference, depth);
+  for(let i=1;i<=segU;i++) shape.lineTo(circumference - (i/segU)*circumference, depth); // top edge (v=depth), subdivided
+  shape.lineTo(0, 0);
   shape.closePath();
   holePolysMM.forEach(hole=>{
     const path = new THREE.Path();
