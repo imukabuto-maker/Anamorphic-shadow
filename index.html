@@ -914,25 +914,6 @@ function closeMask(mask,w,h,iterations){
   return m;
 }
 
-// Device Clearance — SHIFT mode: instead of clipping (deleting) whatever
-// cutout content originally fell inside the reserved wall-side depth, push
-// the ENTIRE pattern forward by clearRows so nothing is lost — content that
-// used to start at v=0 now starts at v=clearMM instead. Rows [0,clearRows)
-// are always forced solid (that's the point of the clearance). Content that
-// gets pushed past the panel's own raster height (i.e. the box isn't deep
-// enough to also fit the shifted pattern) is clipped at the FAR end instead
-// — the far/front-opening edge is the true physical limit, so that's a more
-// honest place to lose data than an arbitrary cut right after the wall.
-function shiftMaskByClearance(mask, w, h, clearRows){
-  if(clearRows<=0) return mask;
-  const shifted = new Uint8Array(w*h); // defaults to 0 = solid everywhere
-  for(let row=0; row<h-clearRows; row++){
-    const srcBase = row*w, dstBase = (row+clearRows)*w;
-    for(let col=0; col<w; col++) shifted[dstBase+col] = mask[srcBase+col];
-  }
-  return shifted;
-}
-
 // Pipe Mode: same LED raycasting idea as computeProjection(), but against a
 // single curved cylindrical wall instead of 4 flat panels. The "panel" here
 // is the pipe's surface unrolled flat: width = circumference (2*pi*R),
@@ -987,10 +968,13 @@ function computeProjectionCylinder(){
   const minComponent = Math.max(2,Math.round(PX_PER_MM*PX_PER_MM*0.15));
   const finalMask = new Uint8Array(pw*ph);
   for(let i=0;i<finalMask.length;i++) finalMask[i] = (total[i]>0 && (lit[i]/total[i])>=0.5) ? 1:0;
-  let closed = closeMask(finalMask, pw, ph, 1);
+  const closed = closeMask(finalMask, pw, ph, 1);
   removeSmallComponents(closed, pw, ph, minComponent, 'both');
   const clearRows = Math.round((clearMM/D)*ph);
-  closed = shiftMaskByClearance(closed, pw, ph, clearRows);
+  for(let row=0; row<clearRows && row<ph; row++){
+    const base=row*pw;
+    for(let col=0; col<pw; col++) closed[base+col]=0;
+  }
   removeSmallComponents(closed, pw, ph, minComponent, 'both');
 
   const pipePanel = {mask:closed, w:pw, h:ph, dimW:circumference, dimH:D, clearMM};
@@ -1100,15 +1084,17 @@ function computeProjection(){
     removeSmallComponents(closed0, p.w, p.h, minComponent, 'both');
 
     // Device clearance zone: v (depth) runs 0=wall-side -> boxD=front/opening,
-    // which maps to row index 0 -> p.h. Rows inside the reserved depth are
-    // always forced solid so the controller/driver never collides with a
-    // cutout — SHIFT mode additionally pushes the rest of the pattern
-    // forward by that same amount, instead of deleting whatever content
-    // originally fell inside the clearance zone.
+    // which maps to row index 0 -> p.h. Blank out every row inside the
+    // reserved depth so the controller/driver never collides with a cutout.
     const clearRows = Math.round((clearMM/boxD)*p.h);
-    const closed = shiftMaskByClearance(closed0, p.w, p.h, clearRows);
-    // Re-clean after the shift so nothing jagged survives right at the new
-    // clearance boundary (a hard row-boundary can leave tiny fragments there).
+    const closed = closed0;
+    for(let row=0; row<clearRows && row<p.h; row++){
+      const base = row*p.w;
+      for(let col=0; col<p.w; col++) closed[base+col]=0;
+    }
+    // The hard cut above can slice through real content or leave tiny
+    // fragments right along that new boundary — clean up again so nothing
+    // jagged survives right at the clearance line.
     removeSmallComponents(closed, p.w, p.h, minComponent, 'both');
 
     result[k]={mask:closed, w:p.w, h:p.h, dimW:p.dimW, dimH:boxD, clearMM};
@@ -1535,80 +1521,77 @@ function initThreeScene(){
   resize();
 }
 
-function pointInPolygon(x, y, poly){
-  let inside = false;
-  for(let i=0, j=poly.length-1; i<poly.length; j=i++){
-    const xi=poly[i][0], yi=poly[i][1], xj=poly[j][0], yj=poly[j][1];
-    const intersect = ((yi>y) !== (yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi);
-    if(intersect) inside = !inside;
+function warpFlatGeometryToCylinder(geo, R){
+  // Takes a flat ExtrudeGeometry built in (u, v, extrudeDepth) space and bends
+  // it onto a cylinder of radius R: u becomes the arc-length position
+  // (theta = u/R), v stays as the axial/depth coordinate, and the extrusion
+  // depth becomes a small radial offset — so material extruded "outward"
+  // sits at radius R+depth, matching how the flat panels extrude outward too.
+  const pos = geo.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const u = pos.getX(i), v = pos.getY(i), z = pos.getZ(i);
+    const theta = u/R;
+    const radius = R + z;
+    pos.setXYZ(i, radius*Math.cos(theta), radius*Math.sin(theta), v);
   }
-  return inside;
+  pos.needsUpdate = true;
+  geo.computeVertexNormals(); // original flat-extrusion normals are invalid after bending
+  return geo;
 }
 
 function buildPipeMeshFromPolygons(circumference, depth, holePolysMM, matColor){
-  // Builds the tube wall as a fine regular grid of small quads wrapped
-  // directly onto the cylinder (each quad computed straight in cylindrical
-  // coordinates, never via a flat-then-bend step). A cutout hole is applied
-  // by testing each grid cell's center against the SAME smooth vector
-  // polygons (getCutoutPolygonsMM) used by the 2D panel preview and export,
-  // so the edges still follow the true smooth shape at whatever resolution
-  // the grid provides — but because every quad only spans one small local
-  // grid cell, there's no possibility of a single triangle spanning a huge
-  // angular range.
+  // Same exact Shape+holes+ExtrudeGeometry pattern as buildPanelMesh (true
+  // vector geometry, zero quantization) — built flat first, then every
+  // vertex is bent onto the cylinder afterward. This guarantees the mesh's
+  // cutout edges are geometrically identical to the exported vector paths,
+  // not an approximation at some grid resolution.
   //
-  // (An earlier version built a flat Shape+holes with THREE.ExtrudeGeometry
-  // and warped the result afterward. That's correct for FLAT panels, but a
-  // flat polygon's triangulator (earcut) has no idea the shape is about to
-  // be bent into a tube — with a plain rectangle having many points along
-  // its long top/bottom edges but only 2 on the short left/right edges, it
-  // could legally choose a "fan" triangulation connecting far-apart points
-  // across the rectangle. Perfectly valid in flat space, but once bent onto
-  // the cylinder those long diagonal triangles cut straight across the
-  // tube's interior like a chord — that's what produced the wedge artifact.)
-  const segU = 120, segV = Math.max(10, Math.round(depth/2));
+  // The outer boundary's long circumferential edges are subdivided into many
+  // points (a plain 4-corner rectangle would collapse into a degenerate
+  // sliver once bent, since u=0 and u=circumference are nearly the same
+  // angle). Hole polygon points are also clamped to stay strictly inside the
+  // outer boundary's v-range: when Invert Cutout trims `depth` shorter than
+  // the full raster height a hole was extracted from, a hole point sitting
+  // just outside the outline is undefined behaviour for the triangulator —
+  // this was the likely real cause of a chunk of the mesh silently failing
+  // to build (looking like a missing wedge), independent of the boundary
+  // subdivision fix.
+  const shape = new THREE.Shape();
+  const segU = 96;
+  shape.moveTo(0,0);
+  for(let i=1;i<=segU;i++) shape.lineTo((i/segU)*circumference, 0);
+  shape.lineTo(circumference, depth);
+  for(let i=1;i<=segU;i++) shape.lineTo(circumference - (i/segU)*circumference, depth);
+  shape.lineTo(0, 0);
+  shape.closePath();
+  const eps = depth*0.001;
+  holePolysMM.forEach(hole=>{
+    const path = new THREE.Path();
+    hole.forEach(([u,v],i)=>{
+      const uc = Math.min(circumference-eps, Math.max(eps, u));
+      const vc = Math.min(depth-eps, Math.max(eps, v));
+      if(i===0) path.moveTo(uc,vc); else path.lineTo(uc,vc);
+    });
+    path.closePath();
+    shape.holes.push(path);
+  });
   const wallThickness = Math.max(1, state.thick||3);
+  let geo;
+  try{
+    geo = new THREE.ExtrudeGeometry(shape, {depth:wallThickness, bevelEnabled:false, curveSegments:1, steps:1});
+  } catch(err){
+    console.warn('Pipe mesh: hole triangulation failed, falling back to a solid tube.', err);
+    const plainShape = new THREE.Shape();
+    plainShape.moveTo(0,0);
+    for(let i=1;i<=segU;i++) plainShape.lineTo((i/segU)*circumference, 0);
+    plainShape.lineTo(circumference, depth);
+    for(let i=1;i<=segU;i++) plainShape.lineTo(circumference - (i/segU)*circumference, depth);
+    plainShape.lineTo(0, 0);
+    plainShape.closePath();
+    geo = new THREE.ExtrudeGeometry(plainShape, {depth:wallThickness, bevelEnabled:false, curveSegments:1, steps:1});
+  }
   const R = circumference/(2*Math.PI);
-  const Rout = R + wallThickness;
-
-  function isSolid(u, v){
-    for(const hole of holePolysMM){ if(pointInPolygon(u, v, hole)) return false; }
-    return true;
-  }
-
-  const positions=[], normals=[], indices=[];
-  let vi=0;
-  function pushQuad(p00,p10,p11,p01, nrm){
-    for(const p of [p00,p10,p11,p01]) positions.push(...p);
-    for(let k=0;k<4;k++) normals.push(...nrm);
-    indices.push(vi,vi+1,vi+2, vi,vi+2,vi+3);
-    vi+=4;
-  }
-
-  for(let i=0;i<segU;i++){
-    const u0=(i/segU)*circumference, u1=((i+1)/segU)*circumference;
-    const th0=u0/R, th1=u1/R;
-    const c0=Math.cos(th0), s0=Math.sin(th0), c1=Math.cos(th1), s1=Math.sin(th1);
-    for(let j=0;j<segV;j++){
-      const v0=(j/segV)*depth, v1=((j+1)/segV)*depth;
-      const uc=(u0+u1)/2, vc=(v0+v1)/2;
-      if(!isSolid(uc,vc)) continue; // cutout cell -> leave a gap
-
-      // inner surface (radius R)
-      const i00=[R*c0,R*s0,v0], i10=[R*c1,R*s1,v0], i11=[R*c1,R*s1,v1], i01=[R*c0,R*s0,v1];
-      const nIn=[-Math.cos((th0+th1)/2), -Math.sin((th0+th1)/2), 0];
-      pushQuad(i00,i01,i11,i10, nIn); // wound to face inward
-
-      // outer surface (radius R+thickness)
-      const o00=[Rout*c0,Rout*s0,v0], o10=[Rout*c1,Rout*s1,v0], o11=[Rout*c1,Rout*s1,v1], o01=[Rout*c0,Rout*s0,v1];
-      const nOut=[Math.cos((th0+th1)/2), Math.sin((th0+th1)/2), 0];
-      pushQuad(o00,o10,o11,o01, nOut); // wound to face outward
-    }
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
-  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals,3));
-  geo.setIndex(indices);
+  warpFlatGeometryToCylinder(geo, R);
   const mat = new THREE.MeshStandardMaterial({color:matColor, roughness:0.85, metalness:0.05, side:THREE.DoubleSide});
   const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true; mesh.receiveShadow = true;
