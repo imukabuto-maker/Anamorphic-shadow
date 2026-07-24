@@ -1521,77 +1521,117 @@ function initThreeScene(){
   resize();
 }
 
-function warpFlatGeometryToCylinder(geo, R){
-  // Takes a flat ExtrudeGeometry built in (u, v, extrudeDepth) space and bends
-  // it onto a cylinder of radius R: u becomes the arc-length position
-  // (theta = u/R), v stays as the axial/depth coordinate, and the extrusion
-  // depth becomes a small radial offset — so material extruded "outward"
-  // sits at radius R+depth, matching how the flat panels extrude outward too.
-  const pos = geo.attributes.position;
-  for(let i=0;i<pos.count;i++){
-    const u = pos.getX(i), v = pos.getY(i), z = pos.getZ(i);
-    const theta = u/R;
-    const radius = R + z;
-    pos.setXYZ(i, radius*Math.cos(theta), radius*Math.sin(theta), v);
+function pointInPolygonSet(u, v, holePolysMM){
+  for(const hole of holePolysMM){
+    let inside = false;
+    for(let i=0, j=hole.length-1; i<hole.length; j=i++){
+      const xi=hole[i][0], yi=hole[i][1], xj=hole[j][0], yj=hole[j][1];
+      const intersect = ((yi>v) !== (yj>v)) && (u < (xj-xi)*(v-yi)/(yj-yi)+xi);
+      if(intersect) inside = !inside;
+    }
+    if(inside) return false; // inside any hole => cutout, not solid
   }
-  pos.needsUpdate = true;
-  geo.computeVertexNormals(); // original flat-extrusion normals are invalid after bending
-  return geo;
+  return true;
+}
+
+function bisectCrossing(pSolid, pCutout, holePolysMM, iterations){
+  let lo=pSolid, hi=pCutout;
+  for(let i=0;i<iterations;i++){
+    const mid=[(lo[0]+hi[0])/2, (lo[1]+hi[1])/2];
+    if(pointInPolygonSet(mid[0], mid[1], holePolysMM)) lo=mid; else hi=mid;
+  }
+  return [(lo[0]+hi[0])/2, (lo[1]+hi[1])/2];
+}
+
+// Builds the solid-region sub-polygon(s) for ONE grid cell, given its 4 corner
+// points and their solid/cutout classification. Handles every case (0-4
+// solid corners, including the ambiguous "saddle" case with two diagonal
+// solid corners) by walking contiguous RUNS of solid corners — each run
+// becomes its own polygon [entryCrossing, ...corners-in-run..., exitCrossing],
+// so a saddle case naturally yields two separate small polygons instead of
+// one wrong merged shape.
+function cellSolidPolygons(corners, states, holePolysMM, bisectIters){
+  const n = corners.length;
+  if(states.every(s=>s)) return [corners.slice()];
+  if(states.every(s=>!s)) return [];
+  const cutoutIdx = states.indexOf(false);
+  const polys = [];
+  let i = 0;
+  while(i < n){
+    const idx = (cutoutIdx + 1 + i) % n;
+    if(!states[idx]){ i++; continue; }
+    const runStartIdx = idx;
+    const prevIdx = (runStartIdx - 1 + n) % n;
+    const entry = bisectCrossing(corners[runStartIdx], corners[prevIdx], holePolysMM, bisectIters);
+    const run = [corners[runStartIdx]];
+    let k = i+1, curIdx = (cutoutIdx + 1 + k) % n;
+    while(k < n && states[curIdx]){ run.push(corners[curIdx]); k++; curIdx = (cutoutIdx + 1 + k) % n; }
+    const runEndIdx = (cutoutIdx + 1 + (k-1)) % n;
+    const nextIdx = (runEndIdx + 1) % n;
+    const exit = bisectCrossing(corners[runEndIdx], corners[nextIdx], holePolysMM, bisectIters);
+    polys.push([entry, ...run, exit]);
+    i = k;
+  }
+  return polys.filter(p=>p.length>=3);
 }
 
 function buildPipeMeshFromPolygons(circumference, depth, holePolysMM, matColor){
-  // Same exact Shape+holes+ExtrudeGeometry pattern as buildPanelMesh (true
-  // vector geometry, zero quantization) — built flat first, then every
-  // vertex is bent onto the cylinder afterward. This guarantees the mesh's
-  // cutout edges are geometrically identical to the exported vector paths,
-  // not an approximation at some grid resolution.
-  //
-  // The outer boundary's long circumferential edges are subdivided into many
-  // points (a plain 4-corner rectangle would collapse into a degenerate
-  // sliver once bent, since u=0 and u=circumference are nearly the same
-  // angle). Hole polygon points are also clamped to stay strictly inside the
-  // outer boundary's v-range: when Invert Cutout trims `depth` shorter than
-  // the full raster height a hole was extracted from, a hole point sitting
-  // just outside the outline is undefined behaviour for the triangulator —
-  // this was the likely real cause of a chunk of the mesh silently failing
-  // to build (looking like a missing wedge), independent of the boundary
-  // subdivision fix.
-  const shape = new THREE.Shape();
-  const segU = 96;
-  shape.moveTo(0,0);
-  for(let i=1;i<=segU;i++) shape.lineTo((i/segU)*circumference, 0);
-  shape.lineTo(circumference, depth);
-  for(let i=1;i<=segU;i++) shape.lineTo(circumference - (i/segU)*circumference, depth);
-  shape.lineTo(0, 0);
-  shape.closePath();
-  const eps = depth*0.001;
-  holePolysMM.forEach(hole=>{
-    const path = new THREE.Path();
-    hole.forEach(([u,v],i)=>{
-      const uc = Math.min(circumference-eps, Math.max(eps, u));
-      const vc = Math.min(depth-eps, Math.max(eps, v));
-      if(i===0) path.moveTo(uc,vc); else path.lineTo(uc,vc);
-    });
-    path.closePath();
-    shape.holes.push(path);
-  });
+  // Conforming-grid-with-edge-bisection: a regular grid gives guaranteed-safe
+  // topology (every emitted triangle spans one small local grid cell —
+  // there's no way to get a long diagonal "chord" cutting across the tube
+  // like the earlier Shape+ExtrudeGeometry approach risked). Cells that
+  // straddle a hole boundary are refined with a binary search (bisection)
+  // along their edges against the TRUE smooth vector hole polygons (the
+  // exact same getCutoutPolygonsMM data used for the 2D panel/export) — so
+  // the resulting edge follows the real curve to within the bisection
+  // tolerance, not a coarse grid-cell staircase.
+  const segU = 140, segV = Math.max(14, Math.round(depth/2.2));
   const wallThickness = Math.max(1, state.thick||3);
-  let geo;
-  try{
-    geo = new THREE.ExtrudeGeometry(shape, {depth:wallThickness, bevelEnabled:false, curveSegments:1, steps:1});
-  } catch(err){
-    console.warn('Pipe mesh: hole triangulation failed, falling back to a solid tube.', err);
-    const plainShape = new THREE.Shape();
-    plainShape.moveTo(0,0);
-    for(let i=1;i<=segU;i++) plainShape.lineTo((i/segU)*circumference, 0);
-    plainShape.lineTo(circumference, depth);
-    for(let i=1;i<=segU;i++) plainShape.lineTo(circumference - (i/segU)*circumference, depth);
-    plainShape.lineTo(0, 0);
-    plainShape.closePath();
-    geo = new THREE.ExtrudeGeometry(plainShape, {depth:wallThickness, bevelEnabled:false, curveSegments:1, steps:1});
-  }
   const R = circumference/(2*Math.PI);
-  warpFlatGeometryToCylinder(geo, R);
+  const Rout = R + wallThickness;
+  const BISECT_ITERS = 12; // ~1/4096 of a cell's size — comfortably sub-visual-pixel precision
+
+  function toXY(u, v, radius){ const th=u/R; return [radius*Math.cos(th), radius*Math.sin(th), v]; }
+
+  const positions=[], normals=[], indices=[];
+  let vi=0;
+  function pushTri(pA,pB,pC, nrm){
+    positions.push(...pA,...pB,...pC);
+    for(let k=0;k<3;k++) normals.push(...nrm);
+    indices.push(vi,vi+1,vi+2);
+    vi+=3;
+  }
+  function emitPolygon(polyUV, radius, outward){
+    // Fan-triangulate from the first vertex — safe here because the polygon
+    // is confined to a single small grid cell (never spans a wide angle).
+    const pts = polyUV.map(([u,v])=>toXY(u,v,radius));
+    const uMid = polyUV.reduce((s,p)=>s+p[0],0)/polyUV.length;
+    const th = uMid/R;
+    const nrm = outward ? [Math.cos(th),Math.sin(th),0] : [-Math.cos(th),-Math.sin(th),0];
+    for(let k=1;k<pts.length-1;k++){
+      if(outward) pushTri(pts[0],pts[k],pts[k+1], nrm);
+      else pushTri(pts[0],pts[k+1],pts[k], nrm);
+    }
+  }
+
+  for(let i=0;i<segU;i++){
+    const u0=(i/segU)*circumference, u1=((i+1)/segU)*circumference;
+    for(let j=0;j<segV;j++){
+      const v0=(j/segV)*depth, v1=((j+1)/segV)*depth;
+      const corners = [[u0,v0],[u1,v0],[u1,v1],[u0,v1]];
+      const states = corners.map(([u,v])=>pointInPolygonSet(u,v,holePolysMM));
+      const polys = cellSolidPolygons(corners, states, holePolysMM, BISECT_ITERS);
+      for(const poly of polys){
+        emitPolygon(poly, R, false);    // inner surface (faces inward, toward the LED)
+        emitPolygon(poly, Rout, true);  // outer surface (faces outward)
+      }
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals,3));
+  geo.setIndex(indices);
   const mat = new THREE.MeshStandardMaterial({color:matColor, roughness:0.85, metalness:0.05, side:THREE.DoubleSide});
   const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true; mesh.receiveShadow = true;
